@@ -1,4 +1,4 @@
-# Retries every 90s (5 min after a rate-limit error)
+# Retries every 180s (5 min after a rate-limit error)
 name: oci-a1-catcher
 
 on:
@@ -80,8 +80,8 @@ jobs:
               echo "$(date -u '+%F %T') attempt $n: rate limited, waiting 5 min"
               sleep 300
             elif echo "$out" | grep -qiE "capacity|InternalError|timed out|ServiceUnavailable"; then
-              echo "$(date -u '+%F %T') attempt $n: no capacity, retrying in 90s"
-              sleep 90
+              echo "$(date -u '+%F %T') attempt $n: no capacity, retrying in 180s"
+              sleep 180
             else
               echo "Unexpected error, stopping so you can fix it:"
               echo "$out"
