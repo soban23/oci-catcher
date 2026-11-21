@@ -1,0 +1,87 @@
+name: oci-a1-catcher
+
+on:
+  workflow_dispatch:          # lets you start it by hand
+  schedule:
+    - cron: "0 */6 * * *"     # restarts every 6 hours (each run loops ~5h40m)
+
+concurrency:
+  group: oci-a1
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      OCPUS: "2"              # set to 1 and MEM to 6 for better odds, resize later
+      MEM: "12"
+      BOOT_GB: "100"
+      NAME: "free-a1"
+      OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
+      OCI_USER: ${{ secrets.OCI_USER }}
+      OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+      OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+      OCI_KEY: ${{ secrets.OCI_KEY }}
+      OCI_AD: ${{ secrets.OCI_AD }}
+      OCI_IMAGE: ${{ secrets.OCI_IMAGE }}
+      OCI_SUBNET: ${{ secrets.OCI_SUBNET }}
+      SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
+
+    steps:
+      - name: Install OCI CLI
+        run: pip install --quiet oci-cli
+
+      - name: Configure OCI
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_KEY" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem
+          printf '%s\n' "$SSH_PUBKEY" > ~/ssh.pub
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=$OCI_USER
+          fingerprint=$OCI_FINGERPRINT
+          tenancy=$OCI_TENANCY
+          region=ap-mumbai-1
+          key_file=~/.oci/key.pem
+          EOF
+          chmod 600 ~/.oci/config
+
+      - name: Try to launch until capacity is found
+        run: |
+          # Stop if the instance already exists (avoids making a second one)
+          count=$(oci compute instance list -c "$OCI_TENANCY" --all 2>/dev/null \
+            | jq --arg n "$NAME" '[.data[]? | select(."display-name"==$n and ."lifecycle-state"!="TERMINATED")] | length')
+          if [ "${count:-0}" -gt 0 ]; then
+            echo "Instance '$NAME' already exists. Nothing to do. You can disable this workflow."
+            exit 0
+          fi
+
+          END=$(( $(date +%s) + 340*60 ))
+          n=0
+          while [ "$(date +%s)" -lt "$END" ]; do
+            n=$((n+1))
+            if out=$(oci compute instance launch \
+                -c "$OCI_TENANCY" --availability-domain "$OCI_AD" \
+                --shape VM.Standard.A1.Flex \
+                --shape-config "{\"ocpus\":$OCPUS,\"memoryInGBs\":$MEM}" \
+                --image-id "$OCI_IMAGE" --subnet-id "$OCI_SUBNET" \
+                --assign-public-ip true --boot-volume-size-in-gbs "$BOOT_GB" \
+                --ssh-authorized-keys-file ~/ssh.pub \
+                --display-name "$NAME" 2>&1); then
+              echo "$out"
+              echo "SUCCESS after $n attempts. Disable this workflow now."
+              exit 0
+            fi
+
+            if echo "$out" | grep -qiE "capacity|TooManyRequests|InternalError|timed out|ServiceUnavailable"; then
+              echo "$(date -u '+%F %T') attempt $n: no capacity, retrying in 60s"
+              sleep 60
+            else
+              echo "Unexpected error, stopping so you can fix it:"
+              echo "$out"
+              exit 1
+            fi
+          done
+          echo "Run window ended without capacity. Next scheduled run will continue."
